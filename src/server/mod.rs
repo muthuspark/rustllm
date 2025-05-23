@@ -420,8 +420,8 @@ async fn chat(
         });
     }
 
-    // Generate response
-    let response = model.generate(&context).map_err(|e| ApiError {
+    // Generate response (sync for API)
+    let response = model.generate_sync(&context).map_err(|e| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         message: format!("Failed to generate response: {}", e),
     })?;

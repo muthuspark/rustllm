@@ -6,7 +6,8 @@ authors = ["Alex <alex@example.com>"]
 description = "A Rust-based local LLM chat tool similar to Ollama"
 
 [dependencies]
-# llm = "1.2"  # Temporarily disabled due to API instability
+llama-cpp-2 = "0.1.70"
+num_cpus = "1.16"
 clap = { version = "4.4", features = ["derive", "env"] }
 tokio = { version = "1.35", features = ["full"] }
 axum = "0.7"

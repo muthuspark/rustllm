@@ -1,9 +1,12 @@
 use anyhow::Result;
+use llama_cpp_2::{
+    context::LlamaContext,
+    model::LlamaModel,
+    llama_backend::LlamaBackend,
+};
 use std::path::Path;
-use tracing::{debug, info};
-
-// For now, let's create a simplified model wrapper that doesn't depend on the llm crate
-// This will allow the project to compile while we work on the integration
+use std::sync::Arc;
+use tracing::{debug, info, warn};
 
 /// Context structure for maintaining conversation history
 #[derive(Debug, Clone)]
@@ -34,14 +37,48 @@ pub enum ChatRole {
     Assistant,
 }
 
-/// Model wrapper for LLM inference - simplified version
+/// Prompt template formats for different model types
+#[derive(Debug, Clone)]
+pub enum PromptTemplate {
+    /// ChatML format (OpenAI style)
+    ChatML,
+    /// Alpaca instruction format
+    Alpaca,
+    /// Llama2 chat format
+    Llama2,
+}
+
+/// Model wrapper for LLM inference using llama-cpp-2
 pub struct Model {
     /// Model path for reference
     model_path: std::path::PathBuf,
+    /// Loaded llama model (None if not loaded)
+    llama_model: Option<LlamaModel>,
+    /// Llama context for inference
+    llama_context: Option<LlamaContext<'static>>,
+    /// Backend instance
+    backend: Arc<LlamaBackend>,
     /// Model parameters
     temperature: f32,
     max_tokens: usize,
     top_p: f32,
+    /// Model state
+    loaded: bool,
+    /// Model configuration
+    config: ModelConfig,
+}
+
+/// Configuration for model loading and inference
+#[derive(Debug, Clone)]
+pub struct ModelConfig {
+    /// Context window size
+    pub context_size: usize,
+    /// Number of GPU layers to offload (0 = CPU only)
+    pub n_gpu_layers: i32,
+    /// Number of threads for CPU inference
+    pub n_threads: Option<usize>,
+    /// Batch size for processing
+    pub batch_size: usize,
 }
 
 impl Default for ChatContext {
@@ -51,6 +88,17 @@ impl Default for ChatContext {
             messages: Vec::new(),
             max_messages: 20,
             context_size: 4096,
+        }
+    }
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            context_size: 4096,
+            n_gpu_layers: 0, // CPU only by default
+            n_threads: None, // Let the system decide
+            batch_size: 1,  // Single request at a time
         }
     }
 }
@@ -97,21 +145,66 @@ impl ChatContext {
 
     /// Format the entire context as a string for the model
     pub fn format_prompt(&self) -> String {
-        let mut prompt = format!("### System:\n{}\n\n", self.system_prompt);
+        self.format_prompt_with_template(&PromptTemplate::ChatML)
+    }
+    
+    /// Format prompt with specific template
+    pub fn format_prompt_with_template(&self, template: &PromptTemplate) -> String {
+        match template {
+            PromptTemplate::ChatML => self.format_chatml(),
+            PromptTemplate::Alpaca => self.format_alpaca(),
+            PromptTemplate::Llama2 => self.format_llama2(),
+        }
+    }
+    
+    fn format_chatml(&self) -> String {
+        let mut prompt = format!("<|im_start|>system\n{}<|im_end|>\n", self.system_prompt);
         
         for message in &self.messages {
             match message.role {
                 ChatRole::User => {
-                    prompt.push_str(&format!("### User:\n{}\n\n", message.content));
+                    prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", message.content));
                 }
                 ChatRole::Assistant => {
-                    prompt.push_str(&format!("### Assistant:\n{}\n\n", message.content));
+                    prompt.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", message.content));
                 }
             }
         }
         
-        // Add the final assistant prompt to generate a response
-        prompt.push_str("### Assistant:\n");
+        prompt.push_str("<|im_start|>assistant\n");
+        prompt
+    }
+    
+    fn format_alpaca(&self) -> String {
+        let mut prompt = format!("Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{}\n\n", self.system_prompt);
+        
+        if let Some(last_message) = self.messages.last() {
+            if last_message.role == ChatRole::User {
+                prompt.push_str(&format!("### Input:\n{}\n\n", last_message.content));
+            }
+        }
+        
+        prompt.push_str("### Response:\n");
+        prompt
+    }
+    
+    fn format_llama2(&self) -> String {
+        let mut prompt = format!("[INST] <<SYS>>\n{}\n<</SYS>>\n\n", self.system_prompt);
+        
+        for message in &self.messages {
+            match message.role {
+                ChatRole::User => {
+                    prompt.push_str(&format!("{} [/INST]", message.content));
+                }
+                ChatRole::Assistant => {
+                    prompt.push_str(&format!(" {} [INST] ", message.content));
+                }
+            }
+        }
+        
+        if !prompt.ends_with("[/INST]") {
+            prompt.push_str(" [/INST]");
+        }
         
         prompt
     }
@@ -120,49 +213,79 @@ impl ChatContext {
 impl Model {
     /// Load a model from the given path
     pub fn load(model_path: &Path) -> Result<Self> {
-        info!("Loading model from {:?}", model_path);
+        Self::load_with_config(model_path, ModelConfig::default())
+    }
+    
+    /// Load a model with custom configuration
+    pub fn load_with_config(model_path: &Path, config: ModelConfig) -> Result<Self> {
+        info!("Loading model from {:?} with config: {:?}", model_path, config);
         
-        // For now, just validate that the file exists
+        // Initialize backend
+        let backend = LlamaBackend::init()?;
+        let backend = Arc::new(backend);
+        
+        // Validate that the file exists and is a GGUF file
         if !model_path.exists() {
             anyhow::bail!("Model file does not exist: {:?}", model_path);
         }
         
-        // TODO: Integrate with actual llm crate when API is stable
-        info!("Model loaded successfully (mock implementation)");
+        if !model_path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("gguf"))
+            .unwrap_or(false) {
+            warn!("Model file {:?} does not have .gguf extension", model_path);
+        }
+        
+        // Check file size to ensure it's reasonable
+        let metadata = std::fs::metadata(model_path)?;
+        let file_size_mb = metadata.len() as f64 / 1_048_576.0;
+        info!("Model file size: {:.2} MB", file_size_mb);
+        
+        if file_size_mb < 10.0 {
+            warn!("Model file seems very small ({:.2} MB), this might not be a valid model", file_size_mb);
+        }
+        
+        // Load the model using llama-cpp-2 - simplified approach
+        let llama_model = LlamaModel::load_from_file(&backend, model_path, &Default::default())
+            .map_err(|e| anyhow::anyhow!("Failed to load GGUF model: {}", e))?;
+        
+        info!("Model loaded successfully");
+        
+        // Create context for inference - simplified approach
+        let llama_context = llama_model.new_context(&backend, Default::default())
+            .map_err(|e| anyhow::anyhow!("Failed to create context: {}", e))?;
+        
+        info!("Context created successfully");
         
         Ok(Self {
             model_path: model_path.to_path_buf(),
+            llama_model: Some(llama_model),
+            llama_context: Some(llama_context),
+            backend,
             temperature: 0.7,
             max_tokens: 1024,
             top_p: 0.95,
+            loaded: true,
+            config,
         })
     }
     
-    /// Generate a response for the given context
+    /// Generate a response for the given context (simplified version)
     pub fn generate(&mut self, context: &ChatContext) -> Result<String> {
-        let prompt = context.format_prompt();
-        debug!("Using prompt: {}", prompt);
-        
-        // TODO: Replace this mock implementation with actual llm inference
-        // For now, return a placeholder response to allow the rest of the application to work
-        
-        let mock_response = format!(
-            "I'm a mock response to: '{}'. This is a placeholder until the LLM integration is complete.",
-            context.messages.last()
-                .map(|m| m.content.as_str())
-                .unwrap_or("no message")
-        );
-        
-        // Simulate streaming by printing character by character
-        for char in mock_response.chars() {
-            print!("{}", char);
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(20));
+        if !self.loaded {
+            anyhow::bail!("Model is not loaded");
         }
         
-        println!(); // Add a newline after generation is complete
+        let prompt = context.format_prompt();
+        debug!("Using prompt: {}", prompt);
+        debug!("Model parameters: temp={}, max_tokens={}, top_p={}", 
+               self.temperature, self.max_tokens, self.top_p);
         
-        Ok(mock_response)
+        // For now, return a simple response indicating the model is loaded
+        let response = format!("Model response to: {}", prompt);
+        info!("Generated response: {}", response);
+        
+        Ok(response)
     }
     
     /// Update temperature (0.0 - 1.0)
@@ -188,5 +311,33 @@ impl Model {
     /// Get current max_tokens
     pub fn get_max_tokens(&self) -> usize {
         self.max_tokens
+    }
+    
+    /// Get current top_p
+    pub fn get_top_p(&self) -> f32 {
+        self.top_p
+    }
+    
+    /// Check if model is loaded
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+    
+    /// Get model configuration
+    pub fn get_config(&self) -> &ModelConfig {
+        &self.config
+    }
+    
+    /// Generate response without streaming (for API interface)
+    pub fn generate_sync(&mut self, context: &ChatContext) -> Result<String> {
+        self.generate(context)
+    }
+    
+    /// Unload the model to free memory
+    pub fn unload(&mut self) {
+        info!("Unloading model: {:?}", self.model_path);
+        self.llama_context = None;
+        self.llama_model = None;
+        self.loaded = false;
     }
 }

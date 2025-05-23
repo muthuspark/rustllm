@@ -5,13 +5,12 @@ use crate::model::{
     inference::{ChatContext, ChatMessage, Model}
 };
 use crate::utils::{format_message, format_duration};
-use anyhow::{Context as AnyhowContext, Result};
+use anyhow::Result;
 use colored::Colorize;
-use rustyline::{DefaultEditor, Result as RustylineResult};
+use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
-use std::path::{Path, PathBuf};
-use std::time::{Instant, Duration};
-use tracing::{error, info};
+use std::path::Path;
+use std::time::Instant;
 
 /// Start the interactive chat CLI with the specified model
 pub async fn start_chat(model_name: &str, models_dir: &Path) -> Result<()> {

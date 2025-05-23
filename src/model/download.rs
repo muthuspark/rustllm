@@ -4,11 +4,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 // Model information structure
 #[derive(Debug, Serialize, Deserialize)]

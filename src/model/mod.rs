@@ -2,14 +2,10 @@ pub mod download;
 pub mod inference;
 
 use anyhow::{Context, Result};
-use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::Client;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
-use tracing::{error, info};
+use tracing::info;
 
 // Main functions exposed from this module
 pub async fn download_model(model_name: &str, models_dir: &Path) -> Result<()> {

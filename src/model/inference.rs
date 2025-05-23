@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // For now, let's create a simplified model wrapper that doesn't depend on the llm crate
 // This will allow the project to compile while we work on the integration

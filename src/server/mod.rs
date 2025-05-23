@@ -14,7 +14,7 @@ use std::{
     path::{Path as FilePath, PathBuf},
     sync::{Arc, Mutex},
 };
-use tracing::{debug, error, info};
+use tracing::info;
 
 use crate::model::{
     self,

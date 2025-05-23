@@ -14,7 +14,7 @@ A Rust-based local LLM chat tool similar to Ollama.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/rustllm.git
+git clone https://github.com/muthuspark/rustllm.git
 cd rustllm
 
 # Build the project
